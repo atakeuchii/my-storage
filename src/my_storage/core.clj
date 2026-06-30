@@ -1,7 +1,9 @@
 (ns my-storage.core
   (:refer-clojure :exclude [get])
   (:require [clojure.java.io :as io])
-  (:import [java.io FileOutputStream ByteArrayOutputStream DataOutputStream]
+  (:import [java.io FileOutputStream ByteArrayOutputStream DataOutputStream File RandomAccessFile]
+           [java.nio ByteBuffer]
+           [java.nio.file Files]
            [java.util.zip CRC32]))
 
 (defprotocol IKVStore
@@ -31,6 +33,55 @@
       (.writeInt dos (unchecked-int (.getValue crc)))
       (.flush dos)
       (.toByteArray baos))))
+
+(defn- try-read-record
+  "buf の現在位置から1レコードを読む"
+  [^ByteBuffer buf]
+  (let [start (.position buf)]
+    (try
+      (let [key-len (.getInt buf)
+            _ (when (neg? key-len) (throw (ex-info "bad key-len" {})))
+            kb (byte-array key-len)
+            _ (.get buf kb)
+            val-len (.getInt buf)
+            tomb? (= val-len -1)
+            vb (when-not tomb?
+                 (when (neg? val-len) (throw (ex-info "bad val-len" {})))
+                 (let [a (byte-array val-len)] (.get buf a) a))
+            stored-crc (.getInt buf)
+            end (.position buf)
+            payload (byte-array (- end start 4))]
+        (.position buf start)
+        (.get buf payload)
+        (.position buf end)
+        (let [crc (doto (CRC32.) (.update payload))]
+          (when (= (unchecked-int (.getValue crc)) stored-crc)
+            {:k (String. kb "UTF-8")
+             :v (if tomb? ::tombstone (String. vb "UTF-8"))
+             :next-pos end})))
+      (catch java.nio.BufferUnderflowException _
+        nil)
+      (catch clojure.lang.ExceptionInfo _
+        nil))))
+
+(defn- replay
+  "WALを先頭から詠み、[memtable good-bytes]を返す。"
+  [^File file]
+  (if-not (.exists file)
+    [(sorted-map) 0]
+    (let [buf (ByteBuffer/wrap (Files/readAllBytes (.toPath file)))]
+      (loop [mt (sorted-map), good 0]
+        (if-let [rec (try-read-record buf)]
+          (recur (if (= (:v rec) ::tombstone)
+                   (dissoc mt (:k rec))
+                   (assoc mt (:k rec) (:v rec)))
+                 (long (:next-pos rec)))
+          [mt good])))))
+
+(defn- truncate! 
+  [^File file ^long size]
+  (with-open [raf (RandomAccessFile. file "rw")]
+    (.setLength raf size)))
 
 (defrecord WAL [^FileOutputStream out file])
 
@@ -70,5 +121,9 @@
   [dir]
   (let [d (io/file dir)]
     (.mkdirs d)
-    (->LSMStore (atom (sorted-map))
-                (wal-open (io/file d "wal.log")))))
+    (let [wal-file (io/file d "wal.log")
+          [mt good] (replay wal-file)]
+      (when (< good (.length wal-file))
+        (truncate! wal-file good))
+      (->LSMStore (atom mt)
+                  (wal-open wal-file)))))
