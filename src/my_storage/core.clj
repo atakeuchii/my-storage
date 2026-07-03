@@ -1,10 +1,75 @@
 (ns my-storage.core
   (:refer-clojure :exclude [get])
   (:require [clojure.java.io :as io])
-  (:import [java.io FileOutputStream ByteArrayOutputStream DataOutputStream File RandomAccessFile]
+  (:import [java.io FileOutputStream ByteArrayOutputStream DataOutputStream BufferedOutputStream File RandomAccessFile]
            [java.nio ByteBuffer]
            [java.nio.file Files]
            [java.util.zip CRC32]))
+
+(def ^:private sstable-magic
+  (.getBytes "MYSSTBL1" "UTF-8"))
+
+(def ^:private index-interval
+  128)
+
+(defn- write-entry!
+  [^DataOutputStream dos ^String k v]
+  (let [kb (.getBytes k "UTF-8")]
+    (.writeInt dos (alength kb))
+    (.write dos kb)
+    (if (= v :tombstone)
+      (.writeInt dos (int -1))
+      (let [vb (.getBytes ^String v "UTF-8")]
+        (.writeInt dos (alength vb))
+        (.write dos vb)))))
+
+(defn write-sstable!
+  "memtable を sstable として書き出す。index-interval ごとに index を作る。"
+  [^File file entries]
+  (with-open [fos (FileOutputStream. file)
+              dos (DataOutputStream. (BufferedOutputStream. fos))]
+    (let [index (loop [es (seq entries)
+                       i 0
+                       acc (transient [])]
+                  (if-let [[k v] (first es)]
+                    (let [offset (.size dos)]
+                      (write-entry! dos k v)
+                      (recur (next es)
+                             (inc i)
+                             (if (zero? (mod i index-interval))
+                               (conj! acc [k offset])
+                               acc)))
+                    (persistent! acc)))
+          entry-count (count entries)
+          index-offset (.size dos)]
+      (.writeInt dos (count index))
+      (doseq [[^String k ^long offset] index]
+        (let [kb (.getBytes k "UTF-8")]
+          (.writeInt dos (alength kb))
+          (.write dos kb)
+          (.writeLong dos offset)))
+      (.writeLong dos index-offset)
+      (.writeInt dos entry-count)
+      (.write dos sstable-magic)
+      (.flush dos)
+      {:file file :entry-count entry-count :index-entries (count index)})))
+
+(defn- next-sstable-file
+  [^File dir]
+  (io/file dir (format "sstable-%013d.db" (System/currentTimeMillis))))
+
+(defn- flush-oldest-immutable!
+  "immutables の先頭(最古)を sstable として書き出し、immutables から削除する。"
+  [store]
+  (let [{:keys [immutables]} @(:state store)]
+    (when-let [imm (peek immutables)]
+      (let [file (next-sstable-file (:dir store))]
+        (write-sstable! file imm)
+        (swap! (:state store) update :immutables pop)
+        (println (format "[sstable] wrote %s (%d entries)"
+                         (.getName file)
+                         (count imm)))
+        file))))
 
 (defprotocol IKVStore
   (-put [this k v])
@@ -115,11 +180,9 @@
                                       (assoc :memtable (sorted-map)))
                                   s)))]
     (when (> (count (:immutables new)) (count (:immutables old)))
-      (println (format "[flush] memtable(%d) -> immutable / waiting=%d"
-                       (count (:memtable old))
-                       (count (:immutables new)))))))
+      (flush-oldest-immutable! store))))
 
-(defrecord LSMStore [state wal opts]
+(defrecord LSMStore [state wal opts dir]
   IKVStore
   (-put [this k v]
     (wal-append! wal (record-bytes k v))
@@ -154,4 +217,5 @@
          (truncate! wal-file good))
        (->LSMStore (atom {:memtable mt :immutables []})
                    (wal-open wal-file)
-                   opts)))))
+                   opts
+                   d)))))
