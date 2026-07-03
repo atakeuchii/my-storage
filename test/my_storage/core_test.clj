@@ -39,7 +39,7 @@
     (doseq [k ["c" "a" "b" "delta" "alpha"]]
       (core/put db k k))
     (is (= ["a" "alpha" "b" "c" "delta"]
-           (keys @(:data db))))
+           (keys (:memtable @(:state db)))))
     (core/close db)))
 
 (deftest wal-growson-put
@@ -78,4 +78,47 @@
       (is (= "2" (core/get db2 "b")))
       (core/put db2 "c" "3")
       (is (= "3" (core/get db2 "c")))
+      (core/close db2))))
+
+(deftest flush-trigger-at-threshold
+  (let [db (core/open (temp-dir) {:flush-threshold 3})]
+    (core/put db "a" "1")
+    (core/put db "b" "2")
+    (is (zero? (count (:immutables @(:state db)))))
+    (core/put db "c" "3")
+    (is (= 1 (count (:immutables @(:state db)))))
+    (is (zero? (count (:memtable @(:state db)))))
+    (core/close db)))
+
+(deftest get-sees-immutable-after-flush
+  (let [db (core/open (temp-dir) {:flush-threshold 3})]
+    (core/put db "a" "1")
+    (core/put db "b" "2")
+    (core/put db "c" "3")
+    (core/put db "d" "4")
+    (is (= "1" (core/get db "a")))
+    (is (= "4" (core/get db "d")))
+    (core/close db)))
+
+(deftest newst-wins-across-memtable-and-immutable
+  (let [db (core/open (temp-dir) {:flush-threshold 3})]
+    (core/put db "k" "old")
+    (core/put db "x" "1")
+    (core/put db "y" "2")
+    (core/put db "k" "new")
+    (is (= "new" (core/get db "k")))
+    (core/close db)))
+
+(deftest restart-collapses-immutables-into-memtable
+  (let [dir (temp-dir)]
+    (let [db (core/open dir {:flush-threshold 3})]
+      (core/put db "a" "1")
+      (core/put db "b" "2")
+      (core/put db "c" "3")
+      (core/put db "d" "4")
+      (core/close db))
+    (let [db2 (core/open dir {:flush-threshold 3})]
+      (is (zero? (count (:immutables @(:state db2)))))
+      (is (= "1" (core/get db2 "a")))
+      (is (= "4" (core/get db2 "d")))
       (core/close db2))))

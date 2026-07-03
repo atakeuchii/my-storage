@@ -78,7 +78,7 @@
                  (long (:next-pos rec)))
           [mt good])))))
 
-(defn- truncate! 
+(defn- truncate!
   [^File file ^long size]
   (with-open [raf (RandomAccessFile. file "rw")]
     (.setLength raf size)))
@@ -96,19 +96,44 @@
 (defn- wal-close! [^WAL wal]
   (.close ^FileOutputStream (:out wal)))
 
-(defrecord LSMStore [data wal]
+(defn- mem-find
+  "memtable → immutables(新しい順)の順に k を探す。見つかれば MapEntry(truthy)、無ければ nil"
+  [snapshot k]
+  (let [{:keys [memtable immutables]} snapshot]
+    (or (find memtable k)
+        (some #(find % k) immutables))))
+
+(defn- maybe-flush!
+  "memtable の件数が閾値以上なら、空 memtable にアトミックに切り替え、古い memtable を immutables の先頭(最新)へ退避する。"
+  [store]
+  (let [threshold (:flush-threshold (:opts store))
+        [old new] (swap-vals! (:state store)
+                              (fn [s]
+                                (if (>= (count (:memtable s)) threshold)
+                                  (-> s
+                                      (update :immutables #(into [(:memtable s)] %))
+                                      (assoc :memtable (sorted-map)))
+                                  s)))]
+    (when (> (count (:immutables new)) (count (:immutables old)))
+      (println (format "[flush] memtable(%d) -> immutable / waiting=%d"
+                       (count (:memtable old))
+                       (count (:immutables new)))))))
+
+(defrecord LSMStore [state wal opts]
   IKVStore
   (-put [this k v]
     (wal-append! wal (record-bytes k v))
-    (swap! data assoc k v)
+    (swap! state update :memtable assoc k v)
+    (maybe-flush! this)
     this)
   (-get [this k]
-    (clojure.core/get @data k))
+    (when-let [e (mem-find @state k)]
+      (val e)))
   (-delete [this k]
     (wal-append! wal (record-bytes k :tombstone))
-    (swap! data dissoc k)
+    (swap! state update :memtable dissoc k)
     this)
-  (-close [this] 
+  (-close [this]
     (wal-close! wal)
     nil))
 
@@ -118,12 +143,15 @@
 (defn close [store] (-close store))
 
 (defn open
-  [dir]
-  (let [d (io/file dir)]
-    (.mkdirs d)
-    (let [wal-file (io/file d "wal.log")
-          [mt good] (replay wal-file)]
-      (when (< good (.length wal-file))
-        (truncate! wal-file good))
-      (->LSMStore (atom mt)
-                  (wal-open wal-file)))))
+  ([dir] (open dir {}))
+  ([dir opts]
+   (let [opts (merge {:flush-threshold 1000} opts)
+         d (io/file dir)]
+     (.mkdirs d)
+     (let [wal-file (io/file d "wal.log")
+           [mt good] (replay wal-file)]
+       (when (< good (.length wal-file))
+         (truncate! wal-file good))
+       (->LSMStore (atom {:memtable mt :immutables []})
+                   (wal-open wal-file)
+                   opts)))))
