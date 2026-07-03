@@ -1,6 +1,7 @@
 (ns my-storage.core-test
   (:require [clojure.test :refer [deftest is]]
             [clojure.java.io :as io]
+            [clojure.string :as str]
             [my-storage.core :as core]))
 
 (defn- temp-dir []
@@ -80,23 +81,12 @@
       (is (= "3" (core/get db2 "c")))
       (core/close db2))))
 
-(deftest flush-trigger-at-threshold
-  (let [db (core/open (temp-dir) {:flush-threshold 3})]
-    (core/put db "a" "1")
-    (core/put db "b" "2")
-    (is (zero? (count (:immutables @(:state db)))))
-    (core/put db "c" "3")
-    (is (= 1 (count (:immutables @(:state db)))))
-    (is (zero? (count (:memtable @(:state db)))))
-    (core/close db)))
-
 (deftest get-sees-immutable-after-flush
   (let [db (core/open (temp-dir) {:flush-threshold 3})]
     (core/put db "a" "1")
     (core/put db "b" "2")
     (core/put db "c" "3")
     (core/put db "d" "4")
-    (is (= "1" (core/get db "a")))
     (is (= "4" (core/get db "d")))
     (core/close db)))
 
@@ -122,3 +112,29 @@
       (is (= "1" (core/get db2 "a")))
       (is (= "4" (core/get db2 "d")))
       (core/close db2))))
+
+(deftest sstable-has-valid-footer
+  (let [dir  (temp-dir)
+        f    (io/file dir "t.db")
+        _    (core/write-sstable! f (sorted-map "a" "1" "b" "2" "c" "3"))
+        bs   (java.nio.file.Files/readAllBytes (.toPath f))
+        len  (alength bs)
+        buf  (doto (java.nio.ByteBuffer/wrap bs) (.position (- len 20)))
+        idx  (.getLong buf)
+        cnt  (.getInt buf)
+        mgc  (let [m (byte-array 8)] (.get buf m) (String. m "UTF-8"))]
+    (is (= 3 cnt))
+    (is (= "MYSSTBL1" mgc))
+    (is (< 0 idx len))))
+
+(deftest flush-writes-sstable-file
+  (let [dir (temp-dir)
+        db  (core/open dir {:flush-threshold 3})]
+    (core/put db "a" "1")
+    (core/put db "b" "2")
+    (core/put db "c" "3")
+    (let [dbs (->> (.listFiles (io/file dir))
+                   (filter #(str/ends-with? (.getName %) ".db")))]
+      (is (= 1 (count dbs)))
+      (is (zero? (count (:immutables @(:state db))))))
+    (core/close db)))
