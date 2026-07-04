@@ -86,3 +86,40 @@
       (is (= 1 (count dbs)))
       (is (zero? (count (:immutables @(:state db))))))
     (core/close db)))
+
+(deftest get-from-sstable-after-flush
+  (let [db (core/open (temp-dir) {:flush-threshold 3})]
+    (core/put db "a" "1")
+    (core/put db "b" "2")
+    (core/put db "c" "3")
+    (is (= {} (:memtable @(:state db))))
+    (is (= "1" (core/get db "a")))
+    (is (= "2" (core/get db "b")))
+    (is (= "3" (core/get db "c")))
+    (core/close db)))
+
+(deftest newest-wins-across-sstables
+  (let [db (core/open (temp-dir) {:flush-threshold 2})]
+    (core/put db "k" "old")
+    (core/put db "x" "1")
+    (core/put db "y" "2")
+    (core/put db "k" "new")
+    (is (= "new" (core/get db "k")))
+    (is (= "1" (core/get db "x")))
+    (is (= "2" (core/get db "y")))
+    (is (nil? (core/get db "nope")))
+    (core/close db)))
+
+(deftest reopen-preserves-values
+  (let [dir (temp-dir)]
+    (let [db (core/open dir {:flush-threshold 3})]
+      (core/put db "a" "1")
+      (core/put db "b" "2")
+      (core/put db "c" "3")
+      (core/put db "d" "4")
+      (core/close db))
+    (let [db2 (core/open dir {:flush-threshold 3})]
+      (is (= "1" (core/get db2 "a")))
+      (is (= "2" (core/get db2 "b")))
+      (is (= "3" (core/get db2 "c")))
+      (core/close db2))))
