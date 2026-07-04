@@ -18,18 +18,30 @@
     (when-let [imm (peek immutables)]
       (let [file (sstable/next-sstable-file (:dir store))]
         (sstable/write-sstable! file imm)
-        (swap! (:state store) update :immutables pop)
+        (let [reader (sstable/open-reader file)]
+          (swap! (:state store)
+                 (fn [s]
+                   (-> s
+                       (update :immutables pop)
+                       (update :sstables #(into [reader] %))))))
         (println (format "[sstable] wrote %s (%d entries)"
                          (.getName file)
                          (count imm)))
         file))))
 
-(defn- mem-find
-  "memtable → immutables(新しい順)の順に k を探す。見つかれば MapEntry(truthy)、無ければ nil"
+(defn- lookup
   [snapshot k]
-  (let [{:keys [memtable immutables]} snapshot]
-    (or (find memtable k)
-        (some #(find % k) immutables))))
+  (let [{:keys [memtable immutables sstables]} snapshot]
+    (if-let [e (or (find memtable k)
+                   (some #(find % k) immutables))]
+      (val e)
+      (loop [ss (seq sstables)]
+        (when ss
+          (let [v (sstable/sstable-get (first ss) k)]
+            (cond
+              (= v enc/not-found) (recur (next ss))
+              (= v enc/tombstone) nil
+              :else v)))))))
 
 (defn- maybe-flush!
   "memtable の件数が閾値以上なら、空 memtable にアトミックに切り替え、古い memtable を immutables の先頭(最新)へ退避する。"
@@ -53,20 +65,27 @@
     (maybe-flush! this)
     this)
   (-get [this k]
-    (when-let [e (mem-find @state k)]
-      (val e)))
+    (lookup @state k))
   (-delete [this k]
     (wal/append! wal (enc/record-bytes k enc/tombstone))
     (swap! state update :memtable dissoc k)
     this)
   (-close [this]
     (wal/close! wal)
+    (doseq [r (:sstables @state)]
+      (sstable/close-reader! r))
     nil))
 
 (defn put [store k v] (-put store k v))
 (defn get [store k] (-get store k))
 (defn delete [store k] (-delete store k))
 (defn close [store] (-close store))
+
+(defn- load-sstables
+  [dir]
+  (->> (sstable/list-sstable-files dir)
+       reverse
+       (mapv sstable/open-reader)))
 
 (defn open
   ([dir] (open dir {}))
@@ -75,10 +94,11 @@
          d (io/file dir)]
      (.mkdirs d)
      (let [wal-file (io/file d "wal.log")
-           [mt good] (wal/replay wal-file)]
+           [mt good] (wal/replay wal-file)
+           sstables (load-sstables d)]
        (when (< good (.length wal-file))
          (wal/truncate! wal-file good))
-       (->LSMStore (atom {:memtable mt :immutables []})
+       (->LSMStore (atom {:memtable mt :immutables [] :sstables sstables})
                    (wal/open wal-file)
                    opts
                    d)))))

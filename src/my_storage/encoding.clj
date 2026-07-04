@@ -4,9 +4,8 @@
            [java.nio ByteBuffer]
            [java.util.zip CRC32]))
 
-(def tombstone
-  "削除マーカー。memtable / WAL / sstable で共有する唯一の tombstone センチネル。"
-  ::tombstone)
+(def tombstone ::tombstone)
+(def not-found ::not-found)
 
 (defn record-bytes
   "1レコードを [keyLen][key][valLen][value][crc] のバイト列にして返す。
