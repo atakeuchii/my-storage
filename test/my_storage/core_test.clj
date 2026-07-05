@@ -123,3 +123,20 @@
       (is (= "2" (core/get db2 "b")))
       (is (= "3" (core/get db2 "c")))
       (core/close db2))))
+
+(deftest bloom-kips-sstable-reads-for-absent-key
+  (let [db (core/open (temp-dir) {:flush-threshold 2})]
+    (doseq [i (range 10)]
+      (core/put db (format "k%02d" i) (str i)))
+    (core/get db "zzz-absent")
+    (let [{:keys [reads skips]} @(:stats db)]
+      (is (pos? skips))
+      (is (> skips reads) (str "reads=" reads " skips=" skips)))
+    (core/close db)))
+
+(deftest bloom-does-not-hide-present-key
+  (let [db (core/open (temp-dir) {:flush-threshold 2})]
+    (doseq [i (range 10)]
+      (core/put db (format "k%02d" i) (str i)))
+    (is (every? #(= (str %) (core/get db (format "k%02d" %))) (range 10)))
+    (core/close db)))

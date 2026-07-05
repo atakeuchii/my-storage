@@ -30,18 +30,24 @@
         file))))
 
 (defn- lookup
-  [snapshot k]
-  (let [{:keys [memtable immutables sstables]} snapshot]
+  [store k]
+  (let [{:keys [memtable immutables sstables]} @(:state store)
+        stats (:stats store)]
     (if-let [e (or (find memtable k)
                    (some #(find % k) immutables))]
       (val e)
       (loop [ss (seq sstables)]
         (when ss
-          (let [v (sstable/sstable-get (first ss) k)]
-            (cond
-              (= v enc/not-found) (recur (next ss))
-              (= v enc/tombstone) nil
-              :else v)))))))
+          (let [reader (first ss)]
+            (if (sstable/might-contain? reader k)
+              (do (swap! stats update :reads inc)
+                  (let [v (sstable/sstable-get reader k)]
+                    (cond
+                      (= v enc/not-found) (recur (next ss))
+                      (= v enc/tombstone) nil
+                      :else v)))
+              (do (swap! stats update :skips inc)
+                  (recur (next ss))))))))))
 
 (defn- maybe-flush!
   "memtable の件数が閾値以上なら、空 memtable にアトミックに切り替え、古い memtable を immutables の先頭(最新)へ退避する。"
@@ -57,7 +63,9 @@
     (when (> (count (:immutables new)) (count (:immutables old)))
       (flush-oldest-immutable! store))))
 
-(defrecord LSMStore [state wal opts dir]
+;; (defn stats [store] @(:stats store))
+
+(defrecord LSMStore [state wal opts dir stats]
   IKVStore
   (-put [this k v]
     (wal/append! wal (enc/record-bytes k v))
@@ -65,7 +73,7 @@
     (maybe-flush! this)
     this)
   (-get [this k]
-    (lookup @state k))
+    (lookup this k))
   (-delete [this k]
     (wal/append! wal (enc/record-bytes k enc/tombstone))
     (swap! state update :memtable dissoc k)
@@ -101,4 +109,5 @@
        (->LSMStore (atom {:memtable mt :immutables [] :sstables sstables})
                    (wal/open wal-file)
                    opts
-                   d)))))
+                   d
+                   (atom {:reads 0 :skips 0}))))))
