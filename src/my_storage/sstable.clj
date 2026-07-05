@@ -1,20 +1,17 @@
 (ns my-storage.sstable
   "sorted-map を SSTable ファイルとして書き出す層。"
   (:require [clojure.java.io :as io]
-            [my-storage.encoding :as enc])
+            [my-storage.encoding :as enc]
+            [my-storage.bloom :as bloom])
   (:import [java.io FileOutputStream DataOutputStream BufferedOutputStream File]
            [java.nio ByteBuffer]
            [java.nio.channels FileChannel]
            [java.nio.file StandardOpenOption OpenOption]
            [java.util.concurrent.atomic AtomicLong]))
 
-(def ^:private sstable-magic
-  (.getBytes "MYSSTBL1" "UTF-8"))
-
-(def ^:private index-interval
-  128)
-
-(def ^:private footer-size 20)
+(def ^:private sstable-magic (.getBytes "MYSSTBL1" "UTF-8"))
+(def ^:private index-interval 128)
+(def ^:private footer-size 28) ; bloom-offset(8) + index-offset(8) + entry-count(4) + magic(8)
 
 (defonce ^:private sstable-counter (AtomicLong. 0))
 
@@ -34,11 +31,14 @@
   [^File file entries]
   (with-open [fos (FileOutputStream. file)
               dos (DataOutputStream. (BufferedOutputStream. fos))]
-    (let [index (loop [es (seq entries)
+    (let [n (count entries)
+          bf (bloom/create (max 1 n))
+          index (loop [es (seq entries)
                        i 0
                        acc (transient [])]
                   (if-let [[k v] (first es)]
                     (let [offset (.size dos)]
+                      (bloom/add! bf k)
                       (write-entry! dos k v)
                       (recur (next es)
                              (inc i)
@@ -46,7 +46,6 @@
                                (conj! acc [k offset])
                                acc)))
                     (persistent! acc)))
-          entry-count (count entries)
           index-offset (.size dos)]
       (.writeInt dos (count index))
       (doseq [[^String k ^long offset] index]
@@ -54,11 +53,14 @@
           (.writeInt dos (alength kb))
           (.write dos kb)
           (.writeLong dos offset)))
-      (.writeLong dos index-offset)
-      (.writeInt dos entry-count)
-      (.write dos sstable-magic)
-      (.flush dos)
-      {:file file :entry-count entry-count :index-entries (count index)})))
+      (let [bloom-offset (.size dos)]
+        (.write dos ^bytes (bloom/to-bytes bf))
+        (.writeLong dos bloom-offset)
+        (.writeLong dos index-offset)
+        (.writeInt dos n)
+        (.write dos sstable-magic)
+        (.flush dos)
+        {:file file :entry-count n :index-entries (count index)}))))
 
 (defn next-sstable-file
   [^File dir]
@@ -73,7 +75,7 @@
        (sort-by #(.getName ^File %))
        vec))
 
-(defrecord SSTableReader [^FileChannel ch ^File file index ^long index-offset ^long entry-count])
+(defrecord SSTableReader [^FileChannel ch ^File file index ^long index-offset ^long entry-count bloom])
 
 (defn- read-fully
   [^FileChannel ch ^ByteBuffer buf ^long pos]
@@ -91,13 +93,14 @@
         fbuf (ByteBuffer/allocate footer-size)]
     (read-fully ch fbuf (- size footer-size))
     (.flip fbuf)
-    (let [index-offset (.getLong fbuf)
+    (let [bloom-offset (.getLong fbuf)
+          index-offset (.getLong fbuf)
           entry-count (.getInt fbuf)
           magic (let [m (byte-array 8)] (.get fbuf m) (String. m "UTF-8"))]
       (when-not (= magic "MYSSTBL1")
         (.close ch)
         (throw (ex-info "bad sstable magic" {:file (str file) :magic magic})))
-      (let [ibuf (ByteBuffer/allocate (int (- (- size footer-size) index-offset)))]
+      (let [ibuf (ByteBuffer/allocate (int (- bloom-offset index-offset)))]
         (read-fully ch ibuf index-offset)
         (.flip ibuf)
         (let [idx-count (.getInt ibuf)
@@ -109,12 +112,20 @@
                               _ (.get ibuf kb)
                               off (.getLong ibuf)]
                           (recur (inc i) (conj! acc [(String. kb "UTF-8") off])))
-                        (persistent! acc)))]
-          (->SSTableReader ch file index index-offset entry-count))))))
+                        (persistent! acc)))
+              bbuf (ByteBuffer/allocate (int (- (- size footer-size) bloom-offset)))
+              _ (read-fully ch bbuf bloom-offset)
+              _ (.flip bbuf)
+              bf (bloom/from-buffer bbuf)]
+          (->SSTableReader ch file index index-offset entry-count bf))))))
 
 (defn close-reader!
   [^SSTableReader reader]
   (.close ^FileChannel (:ch reader)))
+
+(defn might-contain?
+  [^SSTableReader reader ^String k]
+  (bloom/might-contain? (:bloom reader) k))
 
 (defn- read-entry
   [^ByteBuffer buf]

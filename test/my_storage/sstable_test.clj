@@ -16,13 +16,14 @@
         _    (sstable/write-sstable! f (sorted-map "a" "1" "b" "2" "c" "3"))
         bs   (java.nio.file.Files/readAllBytes (.toPath f))
         len  (alength bs)
-        buf  (doto (java.nio.ByteBuffer/wrap bs) (.position (- len 20)))
+        buf  (doto (java.nio.ByteBuffer/wrap bs) (.position (- len 28)))
+        bloom-off  (.getLong buf)
         idx  (.getLong buf)
         cnt  (.getInt buf)
         mgc  (let [m (byte-array 8)] (.get buf m) (String. m "UTF-8"))]
     (is (= 3 cnt))
     (is (= "MYSSTBL1" mgc))
-    (is (< 0 idx len))))
+    (is (< 0 idx bloom-off len))))
 
 (deftest reader-point-lookup
   (let [dir (temp-dir)
@@ -54,7 +55,7 @@
     (is (= "3" (sstable/sstable-get r "c")))
     (sstable/close-reader! r)))
 
-(deftest readr-manyentries-across-ndex-blocks
+(deftest readr-many-entries-across-ndex-blocks
   (let [dir (temp-dir)
         f (io/file dir "t.db")
         entries (into (sorted-map)
@@ -66,4 +67,14 @@
                            (sstable/sstable-get r (format "key%04d" i))))
                 (range 1000)))
     (is (= enc/not-found (sstable/sstable-get r "key9999")))
+    (sstable/close-reader! r)))
+
+(deftest bloom-no-false-negative-in-sstable
+  (let [dir (temp-dir)
+        f (io/file dir "t.db")
+        entrie (into (sorted-map)
+                     (for [i (range 300)] [(format "k%04d" i) (str i)]))
+        _ (sstable/write-sstable! f entrie)
+        r (sstable/open-reader f)]
+    (is (every? #(sstable/might-contain? r (format "k%04d" %)) (range 300)))
     (sstable/close-reader! r)))
