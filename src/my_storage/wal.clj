@@ -43,3 +43,11 @@
   [^File file ^long size]
   (with-open [raf (RandomAccessFile. file "rw")]
     (.setLength raf size)))
+
+(defn rotate! 
+  [^WAL wal]
+  (.close ^FileOutputStream (:out wal))
+  (let [^File f (:file wal)]
+    (with-open [raf (RandomAccessFile. f "rw")]
+      (.setLength raf 0))
+    (assoc wal :out (FileOutputStream. f true))))
