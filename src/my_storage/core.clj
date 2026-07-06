@@ -3,6 +3,7 @@
   (:require [clojure.java.io :as io]
             [my-storage.encoding :as enc]
             [my-storage.wal :as wal]
+            [my-storage.manifest :as manifest]
             [my-storage.sstable :as sstable]))
 
 (defprotocol IKVStore
@@ -11,23 +12,23 @@
   (-delete [this k])
   (-close [this]))
 
-(defn- flush-oldest-immutable!
-  "immutables の先頭(最古)を sstable として書き出し、immutables から削除する。"
-  [store]
-  (let [{:keys [immutables]} @(:state store)]
-    (when-let [imm (peek immutables)]
-      (let [file (sstable/next-sstable-file (:dir store))]
-        (sstable/write-sstable! file imm)
-        (let [reader (sstable/open-reader file)]
-          (swap! (:state store)
-                 (fn [s]
-                   (-> s
-                       (update :immutables pop)
-                       (update :sstables #(into [reader] %))))))
-        (println (format "[sstable] wrote %s (%d entries)"
-                         (.getName file)
-                         (count imm)))
-        file))))
+(defn- flush-immutable!
+  [store imm]
+  (let [dir (:dir store)
+        file (sstable/next-sstable-file dir)]
+    (sstable/write-sstable! file imm)
+    (manifest/add-sstable! dir (.getName file))
+    (let [reader (sstable/open-reader file)
+          new-wal (wal/rotate! (:wal @(:state store)))]
+      (swap! (:state store)
+             (fn [s]
+               (-> s
+                   (update :immutables pop)
+                   (update :sstables #(into [reader] %))
+                   (assoc :wal new-wal)))))
+    (println (format "[flush] %s (%d entries) / wal rotated"
+                     (.getName file) (count imm)))
+    file))
 
 (defn- lookup
   [store k]
@@ -61,25 +62,25 @@
                                       (assoc :memtable (sorted-map)))
                                   s)))]
     (when (> (count (:immutables new)) (count (:immutables old)))
-      (flush-oldest-immutable! store))))
+      (flush-immutable! store (peek (:immutables new))))))
 
 ;; (defn stats [store] @(:stats store))
 
-(defrecord LSMStore [state wal opts dir stats]
+(defrecord LSMStore [state opts dir stats]
   IKVStore
   (-put [this k v]
-    (wal/append! wal (enc/record-bytes k v))
+    (wal/append! (:wal @state) (enc/record-bytes k v))
     (swap! state update :memtable assoc k v)
     (maybe-flush! this)
     this)
   (-get [this k]
     (lookup this k))
   (-delete [this k]
-    (wal/append! wal (enc/record-bytes k enc/tombstone))
+    (wal/append! (:wal @state) (enc/record-bytes k enc/tombstone))
     (swap! state update :memtable dissoc k)
     this)
   (-close [this]
-    (wal/close! wal)
+    (wal/close! (:wal @state))
     (doseq [r (:sstables @state)]
       (sstable/close-reader! r))
     nil))
@@ -89,25 +90,20 @@
 (defn delete [store k] (-delete store k))
 (defn close [store] (-close store))
 
-(defn- load-sstables
-  [dir]
-  (->> (sstable/list-sstable-files dir)
-       reverse
-       (mapv sstable/open-reader)))
-
 (defn open
   ([dir] (open dir {}))
   ([dir opts]
    (let [opts (merge {:flush-threshold 1000} opts)
          d (io/file dir)]
      (.mkdirs d)
-     (let [wal-file (io/file d "wal.log")
-           [mt good] (wal/replay wal-file)
-           sstables (load-sstables d)]
+     (let [m (manifest/load-manifest d)
+           sstables (mapv #(sstable/open-reader (io/file d %))
+                          (reverse (:sstables m)))
+           wal-file (io/file d "wal.log")
+           [mt good] (wal/replay wal-file)]
        (when (< good (.length wal-file))
          (wal/truncate! wal-file good))
-       (->LSMStore (atom {:memtable mt :immutables [] :sstables sstables})
-                   (wal/open wal-file)
+       (->LSMStore (atom {:memtable mt :immutables [] :sstables sstables :wal (wal/open wal-file)})
                    opts
                    d
                    (atom {:reads 0 :skips 0}))))))

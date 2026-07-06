@@ -2,7 +2,8 @@
   (:require [clojure.test :refer [deftest is]]
             [clojure.java.io :as io]
             [clojure.string :as str]
-            [my-storage.core :as core]))
+            [my-storage.core :as core]
+            [my-storage.manifest :as mf]))
 
 (defn- temp-dir []
   (let [d (java.io.File/createTempFile "lsm" "")]
@@ -140,3 +141,48 @@
       (core/put db (format "k%02d" i) (str i)))
     (is (every? #(= (str %) (core/get db (format "k%02d" %))) (range 10)))
     (core/close db)))
+
+(deftest wal-is-short-after-flush
+  (let [dir (temp-dir)
+        db (core/open dir {:flush-threshold 3})
+        wal (io/file dir "wal.log")]
+    (core/put db "a" "1")
+    (core/put db "b" "2")
+    (core/put db "c" "3")
+    (is (zero? (.length wal)))
+    (core/put db "d" "4")
+    (is (pos? (.length wal)))
+    (core/close db)))
+
+(deftest manifest-records-sstables
+  (let [dir (temp-dir)
+        db (core/open dir {:flush-threshold 2})]
+    (doseq [i (range 6)]
+      (core/put db (format "k%d" i) (str i)))
+    (is (= 3 (count (:sstables (mf/load-manifest dir)))))
+    (core/close db)))
+
+(deftest restart-recovers-from-manifest-and-wal
+  (let [dir (temp-dir)]
+    (let [db (core/open dir {:flush-threshold 3})]
+      (core/put db "a" "1")
+      (core/put db "b" "2")
+      (core/put db "c" "3")
+      (core/put db "d" "4")
+      (core/close db))
+    (let [db2 (core/open dir {:flush-threshold 3})]
+      (is (= "1" (core/get db2 "a")))
+      (is (= "4" (core/get db2 "d")))
+      (is (= 1 (count (:memtable @(:state db2)))))
+      (is (= 1 (count (:sstables @(:state db2)))))
+      (core/close db2))))
+
+(deftest cross-sstable-consistency-after-restart
+  (let [dir (temp-dir)]
+    (let [db (core/open dir {:flush-threshold 2})]
+      (doseq [i (range 20)]
+        (core/put db (format "key%02d" i) (str i)))
+      (core/close db))
+    (let [db2 (core/open dir {:flush-threshold 2})]
+      (is (every? #(= (str %) (core/get db2 (format "key%02d" %))) (range 20)))
+      (core/close db2))))
