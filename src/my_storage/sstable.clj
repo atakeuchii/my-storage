@@ -176,3 +176,21 @@
                 :else (recur)))
             enc/not-found)))
       enc/not-found)))
+
+(defn sstable-scan
+  [^SSTableReader reader start end]
+  (let [{:keys [^FileChannel ch index index-offset]} reader
+        start-off (if (nil? start)
+                    0
+                    (or (first (find-block index index-offset start)) 0))
+        buf (ByteBuffer/allocate (int (- index-offset start-off)))]
+    (read-fully ch buf start-off)
+    (.flip buf)
+    (loop [acc (transient [])]
+      (if (.hasRemaining buf)
+        (let [[k v] (read-entry buf)]
+          (cond
+            (and end (>= (compare k end) 0)) (persistent! acc)
+            (and start (neg? (compare k start))) (recur acc)
+            :else (recur (conj! acc [k v]))))
+        (persistent! acc)))))
