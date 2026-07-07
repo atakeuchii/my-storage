@@ -4,11 +4,13 @@
             [my-storage.encoding :as enc]
             [my-storage.wal :as wal]
             [my-storage.manifest :as manifest]
+            [my-storage.merge :as merge]
             [my-storage.sstable :as sstable]))
 
 (defprotocol IKVStore
   (-put [this k v])
   (-get [this k])
+  (-scan [this start end])
   (-delete [this k])
   (-close [this]))
 
@@ -36,7 +38,8 @@
         stats (:stats store)]
     (if-let [e (or (find memtable k)
                    (some #(find % k) immutables))]
-      (val e)
+      (let [v (val e)]
+        (if (= v enc/tombstone) nil v))
       (loop [ss (seq sstables)]
         (when ss
           (let [reader (first ss)]
@@ -64,7 +67,22 @@
     (when (> (count (:immutables new)) (count (:immutables old)))
       (flush-immutable! store (peek (:immutables new))))))
 
-;; (defn stats [store] @(:stats store))
+(defn- mem-range
+  [sm start end]
+  (->> (cond
+         (and start end) (subseq sm >= start < end)
+         start (subseq sm >= start)
+         end (subseq sm < end)
+         :else (seq sm))
+       (map (fn [e] [(key e) (val e)]))))
+
+(defn- scan* [store start end]
+  (let [{:keys [memtable immutables sstables]} @(:state store)
+        sources (concat [(mem-range memtable start end)]
+                        (map #(mem-range % start end) immutables)
+                        (map #(sstable/sstable-scan % start end) sstables))]
+    (->> (merge/merge-sorted sources)
+         (remove (fn [[_ v]] (= v enc/tombstone))))))
 
 (defrecord LSMStore [state opts dir stats]
   IKVStore
@@ -75,9 +93,12 @@
     this)
   (-get [this k]
     (lookup this k))
+  (-scan [this start end]
+    (scan* this start end))
   (-delete [this k]
     (wal/append! (:wal @state) (enc/record-bytes k enc/tombstone))
-    (swap! state update :memtable dissoc k)
+    (swap! state update :memtable assoc k enc/tombstone)
+    (maybe-flush! this)
     this)
   (-close [this]
     (wal/close! (:wal @state))
@@ -87,6 +108,7 @@
 
 (defn put [store k v] (-put store k v))
 (defn get [store k] (-get store k))
+(defn scan [store start end] (-scan store start end))
 (defn delete [store k] (-delete store k))
 (defn close [store] (-close store))
 

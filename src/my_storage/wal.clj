@@ -30,11 +30,10 @@
   (if-not (.exists file)
     [(sorted-map) 0]
     (let [buf (ByteBuffer/wrap (Files/readAllBytes (.toPath file)))]
-      (loop [mt (sorted-map), good 0]
+      (loop [mt (sorted-map)
+             good 0]
         (if-let [rec (enc/try-read-record buf)]
-          (recur (if (= (:v rec) enc/tombstone)
-                   (dissoc mt (:k rec))
-                   (assoc mt (:k rec) (:v rec)))
+          (recur (assoc mt (:k rec) (:v rec))
                  (long (:next-pos rec)))
           [mt good])))))
 

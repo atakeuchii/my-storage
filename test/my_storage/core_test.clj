@@ -186,3 +186,54 @@
     (let [db2 (core/open dir {:flush-threshold 2})]
       (is (every? #(= (str %) (core/get db2 (format "key%02d" %))) (range 20)))
       (core/close db2))))
+
+(deftest delete-works-for-flushed-key
+  (let [db (core/open (temp-dir) {:flush-threshold 3})]
+    (core/put db "a" "1")
+    (core/put db "b" "2")
+    (core/put db "c" "3")
+    (is (= "1" (core/get db "a")))
+    (core/delete db "a")
+    (is (nil? (core/get db "a")))
+    (is (= "2" (core/get db "b")))
+    (core/close db)))
+
+(deftest reput-after-delete
+  (let [db (core/open (temp-dir) {:flush-threshold 3})]
+    (core/put db "a" "1")
+    (core/put db "b" "2")
+    (core/put db "c" "3")
+    (is (= "1" (core/get db "a")))
+    (core/delete db "a")
+    (is (nil? (core/get db "a")))
+    (core/put db "a" "1b") 
+    (is (= "1b" (core/get db "a")))
+    (core/close db)))
+
+(deftest delete-survives-restart
+  (let [dir (temp-dir)]
+    (let [db (core/open dir {:flush-threshold 3})]
+      (core/put db "a" "1")
+      (core/put db "b" "2")
+      (core/put db "c" "3")
+      (core/delete db "a")
+      (core/close db))
+    (let [db2 (core/open dir {:flush-threshold 3})]
+      (is (nil? (core/get db2 "a")))
+      (is (= "2" (core/get db2 "b")))
+      (core/close db2))))
+
+(deftest scan-sorted-across-layers
+  (let [db (core/open (temp-dir) {:flush-threshold 3})]
+    (core/put db "c" "3")
+    (core/put db "a" "1")
+    (core/put db "e" "5")
+    (core/put db "b" "2")
+    (core/put db "d" "4")
+    (core/put db "a" "1b")
+    (core/delete db "c")
+    (is (= [["a" "1b"] ["b" "2"] ["d" "4"] ["e" "5"]]
+           (core/scan db "a" "z")))
+    (is (= [["b" "2"] ["d" "4"]]
+           (core/scan db "b" "e")))
+    (core/close db)))

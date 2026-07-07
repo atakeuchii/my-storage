@@ -78,3 +78,17 @@
         r (sstable/open-reader f)]
     (is (every? #(sstable/might-contain? r (format "k%04d" %)) (range 300)))
     (sstable/close-reader! r)))
+
+(deftest sstable-scan-range
+  (let [dir (temp-dir)
+        f (io/file dir "t.db")
+        _ (sstable/write-sstable!
+           f (into (sorted-map) (for [c "abcdefg"] [(str c) (str c)])))
+        r (sstable/open-reader f)]
+    (is (= [["b" "b"] ["c" "c"] ["d" "d"]]
+           (sstable/sstable-scan r "b" "e")))
+    (is (= [["a" "a"] ["b" "b"] ["c" "c"] ["d" "d"] ["e" "e"] ["f" "f"] ["g" "g"]]
+           (sstable/sstable-scan r nil nil)))
+    (is (= [["e" "e"] ["f" "f"] ["g" "g"]]
+           (sstable/sstable-scan r "e" nil)))
+    (sstable/close-reader! r)))
