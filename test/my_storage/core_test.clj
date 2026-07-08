@@ -237,3 +237,43 @@
     (is (= [["b" "2"] ["d" "4"]]
            (core/scan db "b" "e")))
     (core/close db)))
+
+(deftest compact-reduces-to-one-file-preserving-data
+  (let [dir (temp-dir)
+        db (core/open dir {:flush-threshold 2})]
+    (doseq [i (range 10)]
+      (core/put db (format "k%02d" i) (str i)))
+    (is (= 5 (count (:sstables @(:state db)))))
+    (core/compact! db)
+    (is (= 1 (count (:sstables @(:state db)))))
+    (is (every? #(= (str %) (core/get db (format "k%02d" %))) (range 10)))
+    (core/close db)))
+
+(deftest compact-reclaims-space-from-deletes
+  (let [dir (temp-dir)
+        db (core/open dir {:flush-threshold 2})]
+    (doseq [i (range 20)]
+      (core/put db "hot" (str i)))
+    (doseq [i (range 10)]
+      (core/put db (format "k%d" i) (str i)))
+    (doseq [i (range 10)]
+      (core/delete db (format "k%d" i)))
+    (let [before (->> (:sstables @(:state db)) (map #(.length (:file %))) (reduce +))]
+      (core/compact! db)
+      (let [after (->> (:sstables @(:state db)) (map #(.length (:file %))) (reduce +))]
+        (is (< after before) (str "before=" before " after=" after))
+        (is (nil? (core/get db "k0")))
+        (is (= "19" (core/get db "hot")))
+        (is (= [["hot" "19"]] (core/scan db nil nil)))))
+    (core/close db)))
+
+(deftest compact-survives-restart
+  (let [dir (temp-dir)]
+    (let [db (core/open dir {:flush-threshold 2})]
+      (doseq [i (range 8)] (core/put db (format "k%d" i) (str i)))
+      (core/compact! db)
+      (core/close db))
+    (let [db2 (core/open dir {:flush-threshold 2})]
+      (is (= 1 (count (:sstables @(:state db2)))))
+      (is (every? #(= (str %) (core/get db2 (format "k%d" %))) (range 8)))
+      (core/close db2))))

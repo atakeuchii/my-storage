@@ -34,3 +34,9 @@
 (defn add-sstable!
   [dir filename]
   (save-manifest! dir (update (load-manifest dir) :sstables conj filename)))
+
+(defn replace-sstables!
+  [dir old-names new-name]
+  (let [m (load-manifest dir)
+        remaining (vec (remove (set old-names) (:sstables m)))]
+    (save-manifest! dir (assoc m :sstables (conj remaining new-name)))))
