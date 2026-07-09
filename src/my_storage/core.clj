@@ -1,11 +1,13 @@
 (ns my-storage.core
   (:refer-clojure :exclude [get])
   (:require [clojure.java.io :as io]
+            [my-storage.compaction :as compaction]
             [my-storage.encoding :as enc]
             [my-storage.wal :as wal]
             [my-storage.manifest :as manifest]
             [my-storage.merge :as merge]
-            [my-storage.sstable :as sstable]))
+            [my-storage.sstable :as sstable])
+  (:import [java.io File]))
 
 (defprotocol IKVStore
   (-put [this k v])
@@ -84,6 +86,23 @@
     (->> (merge/merge-sorted sources)
          (remove (fn [[_ v]] (= v enc/tombstone))))))
 
+(defn- compact*
+  [store]
+  (let [dir (:dir store)
+        old-readers (:sstables @(:state store))]
+    (when (seq old-readers)
+      (let [old-names (mapv #(.getName ^File (:file %)) old-readers)
+            new-file (compaction/compact! dir old-readers true)
+            new-reader (sstable/open-reader new-file)]
+        (manifest/replace-sstables! dir old-names (.getName new-file))
+        (swap! (:state store) assoc :sstables [new-reader])
+        (doseq [r old-readers]
+          (sstable/close-reader! r)
+          (.delete ^File (:file r)))
+        (println (format "[compact] %d files -> %s"
+                         (count old-readers) (.getName new-file)))
+        new-file))))
+
 (defrecord LSMStore [state opts dir stats]
   IKVStore
   (-put [this k v]
@@ -111,6 +130,7 @@
 (defn scan [store start end] (-scan store start end))
 (defn delete [store k] (-delete store k))
 (defn close [store] (-close store))
+(defn compact! [store] (compact* store))
 
 (defn open
   ([dir] (open dir {}))
