@@ -13,3 +13,21 @@
         file (sstable/next-sstable-file dir)]
     (sstable/write-sstable! file entries)
     file))
+
+(defn pick-compaction
+  [sstable-sizes threshold size-ratio]
+  (let [n (count sstable-sizes)]
+    (loop [i 0]
+      (when (< i n)
+        (let [base (second (nth sstable-sizes i))
+              j (loop [j i]
+                  (if (and (< (inc j) n)
+                           (let [s (second (nth sstable-sizes (inc j)))
+                                 hi (double (max s base))
+                                 lo (double (max i (min s base)))]
+                             (< (/ hi lo) size-ratio)))
+                    (recur (inc j))
+                    j))]
+          (if (>= (- (inc j) i) threshold)
+            [i j]
+            (recur (inc j))))))))

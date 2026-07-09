@@ -206,7 +206,7 @@
     (is (= "1" (core/get db "a")))
     (core/delete db "a")
     (is (nil? (core/get db "a")))
-    (core/put db "a" "1b") 
+    (core/put db "a" "1b")
     (is (= "1b" (core/get db "a")))
     (core/close db)))
 
@@ -277,3 +277,41 @@
       (is (= 1 (count (:sstables @(:state db2)))))
       (is (every? #(= (str %) (core/get db2 (format "k%d" %))) (range 8)))
       (core/close db2))))
+
+;; Day11: 大量 put で SSTable が増えても、自動コンパクションで枚数が抑えられる
+(deftest auto-compaction-bounds-sstable-count
+  (let [db (core/open (temp-dir) {:flush-threshold 2 :compaction-threshold 4})]
+    (doseq [i (range 100)]
+      (core/put db (format "k%03d" i) (str i)))
+    (is (< (count (:sstables @(:state db))) 20)
+        (str "sstables=" (count (:sstables @(:state db)))))
+    (is (every? #(= (str %) (core/get db (format "k%03d" %))) (range 100)))
+    (core/close db)))
+
+;; Day11: 部分マージ(最古を含まない)では tombstone を保持し、削除が resurrect しない
+(deftest partial-compaction-keeps-tombstone-correct
+  (let [dir (temp-dir)
+        db (core/open dir {:flush-threshold 2 :compaction-threshold 4})]
+    (core/put db "x" "old")
+    (core/put db "p0" "0")
+    (core/delete db "x")
+    (doseq [i (range 40)]
+      (core/put db (format "k%02d" i) (str i)))
+    (is (nil? (core/get db "x")))
+    (core/close db)
+    (let [db2 (core/open dir {:flush-threshold 2 :compaction-threshold 4})]
+      (is (nil? (core/get db2 "x")))
+      (is (every? #(= (str %) (core/get db2 (format "k%02d" %))) (range 40)))
+      (core/close db2))))
+
+;; Day11: 自動コンパクション後も scan が一貫している
+(deftest scan-consistent-after-auto-compaction
+  (let [db (core/open (temp-dir) {:flush-threshold 2 :compaction-threshold 4})]
+    (doseq [i (range 30)]
+      (core/put db (format "k%02d" i) (str i)))
+    (doseq [i (range 0 30 2)]
+      (core/delete db (format "k%02d" i)))
+    (let [result (core/scan db nil nil)
+          expected (for [i (range 30) :when (odd? i)] [(format "k%02d" i) (str i)])]
+      (is (= (vec expected) (vec result))))
+    (core/close db)))

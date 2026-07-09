@@ -36,3 +36,13 @@
     (is (= [["a" "1"]] (sstable/sstable-scan r nil nil))) 
     (doseq [reader [r r-new r-old]]
       (sstable/close-reader! reader))))
+
+(deftest pick-when-threshold-met
+  (is (= [0 3] (compaction/pick-compaction [["a" 100] ["b" 100] ["c" 100] ["d" 100]] 4 1.5))))
+
+(deftest pick-nil-when-too-few
+  (is (nil? (compaction/pick-compaction [["a" 100] ["b" 100] ["c" 100]] 4 1.5))))
+
+(deftest pick-groups-by-size
+  (is (nil? (compaction/pick-compaction [["big" 1000] ["a" 100] ["b" 100] ["c" 100]] 4 1.5)))
+  (is (= [1 4] (compaction/pick-compaction [["big" 1000] ["a" 100] ["b" 100] ["c" 100] ["d" 100]] 4 1.5))))
