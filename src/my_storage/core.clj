@@ -55,6 +55,42 @@
               (do (swap! stats update :skips inc)
                   (recur (next ss))))))))))
 
+(defn- compact-group!
+  [store i j]
+  (let [dir (:dir store)
+        sstables (:sstables @(:state store))
+        n (count sstables)
+        group (subvec sstables i (inc j))
+        drop-tomb? (= j (dec n))
+        new-file (compaction/compact! dir group drop-tomb?)
+        new-reader (sstable/open-reader new-file)
+        new-sstables (vec (concat (subvec sstables 0 i)
+                                  [new-reader]
+                                  (subvec sstables (inc j))))]
+    (manifest/save-manifest! dir
+                             {:sstables (mapv #(.getName ^File (:file %))
+                                              (reverse new-sstables))})
+    (swap! (:state store) assoc :sstables new-sstables)
+    (doseq [r group]
+      (sstable/close-reader! r)
+      (.delete ^File (:file r)))
+    (println (format "[compact] [%d..%d] %d files (drop-tomb=%s) -> %s"
+                     i j (count group) drop-tomb? (.getName new-file)))
+    new-reader))
+
+(defn- maybe-compact!
+  [store]
+  (when-let [threshold (:compaction-threshold (:opts store))]
+    (let [ratio (:compaction-size-ratio (:opts store))]
+      (loop []
+        (let [sstables (:sstables @(:state store))
+              sizes (mapv (fn [r] [(.getName ^File (:file r))
+                                   (.length ^File (:file r))])
+                          sstables)]
+          (when-let [[i j] (compaction/pick-compaction sizes threshold ratio)]
+            (compact-group! store i j)
+            (recur)))))))
+
 (defn- maybe-flush!
   "memtable の件数が閾値以上なら、空 memtable にアトミックに切り替え、古い memtable を immutables の先頭(最新)へ退避する。"
   [store]
@@ -67,7 +103,8 @@
                                       (assoc :memtable (sorted-map)))
                                   s)))]
     (when (> (count (:immutables new)) (count (:immutables old)))
-      (flush-immutable! store (peek (:immutables new))))))
+      (flush-immutable! store (peek (:immutables new)))
+      (maybe-compact! store))))
 
 (defn- mem-range
   [sm start end]
@@ -86,22 +123,6 @@
     (->> (merge/merge-sorted sources)
          (remove (fn [[_ v]] (= v enc/tombstone))))))
 
-(defn- compact*
-  [store]
-  (let [dir (:dir store)
-        old-readers (:sstables @(:state store))]
-    (when (seq old-readers)
-      (let [old-names (mapv #(.getName ^File (:file %)) old-readers)
-            new-file (compaction/compact! dir old-readers true)
-            new-reader (sstable/open-reader new-file)]
-        (manifest/replace-sstables! dir old-names (.getName new-file))
-        (swap! (:state store) assoc :sstables [new-reader])
-        (doseq [r old-readers]
-          (sstable/close-reader! r)
-          (.delete ^File (:file r)))
-        (println (format "[compact] %d files -> %s"
-                         (count old-readers) (.getName new-file)))
-        new-file))))
 
 (defrecord LSMStore [state opts dir stats]
   IKVStore
@@ -130,12 +151,17 @@
 (defn scan [store start end] (-scan store start end))
 (defn delete [store k] (-delete store k))
 (defn close [store] (-close store))
-(defn compact! [store] (compact* store))
+(defn compact! [store]
+  (let [n (count (:sstables @(:state store)))]
+    (when (pos? n)
+      (compact-group! store 0 (dec n)))))
 
 (defn open
   ([dir] (open dir {}))
   ([dir opts]
-   (let [opts (merge {:flush-threshold 1000} opts)
+   (let [opts (merge {:flush-threshold 1000
+                      :compaction-size-ratio 1.5}
+                     opts)
          d (io/file dir)]
      (.mkdirs d)
      (let [m (manifest/load-manifest d)
