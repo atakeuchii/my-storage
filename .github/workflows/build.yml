@@ -38,3 +38,5 @@ jobs:
 
       - name: Run tests
         run: lein test
+        env:
+          TC_COUNT: 500

@@ -30,8 +30,9 @@
                    (update :immutables pop)
                    (update :sstables #(into [reader] %))
                    (assoc :wal new-wal)))))
-    (println (format "[flush] %s (%d entries) / wal rotated"
-                     (.getName file) (count imm)))
+    (when (:verbose (:opts store))
+      (println (format "[flush] %s (%d entries) / wal rotated"
+                       (.getName file) (count imm))))
     file))
 
 (defn- lookup
@@ -74,8 +75,9 @@
     (doseq [r group]
       (sstable/close-reader! r)
       (.delete ^File (:file r)))
-    (println (format "[compact] [%d..%d] %d files (drop-tomb=%s) -> %s"
-                     i j (count group) drop-tomb? (.getName new-file)))
+    (when (:verbose (:opts store))
+      (println (format "[compact] [%d..%d] %d files (drop-tomb=%s) -> %s"
+                       i j (count group) drop-tomb? (.getName new-file))))
     new-reader))
 
 (defn- maybe-compact!
