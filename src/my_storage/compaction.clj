@@ -4,15 +4,16 @@
             [my-storage.merge :as merge]))
 
 (defn compact!
-  [dir readers drop-tombstones?]
-  (let [sources (map #(sstable/sstable-scan % nil nil) readers)
-        merged (merge/merge-sorted sources)
-        entries (vec (if drop-tombstones?
-                       (remove (fn [[_ v]] (= v enc/tombstone)) merged)
-                       merged))
-        file (sstable/next-sstable-file dir)]
-    (sstable/write-sstable! file entries)
-    file))
+  ([dir readers drop-tombstones?] (compact! dir readers drop-tombstones? {}))
+  ([dir readers drop-tombstones? sst-opts]
+   (let [sources (map #(sstable/sstable-scan % nil nil) readers)
+         merged (merge/merge-sorted sources)
+         entries (vec (if drop-tombstones?
+                        (remove (fn [[_ v]] (= v enc/tombstone)) merged)
+                        merged))
+         file (sstable/next-sstable-file dir)]
+     (sstable/write-sstable! file entries sst-opts)
+     file)))
 
 (defn pick-compaction
   [sstable-sizes threshold size-ratio]

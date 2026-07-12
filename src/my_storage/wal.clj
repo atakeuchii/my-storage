@@ -1,27 +1,40 @@
 (ns my-storage.wal
   "Write-Ahead Log の追記・リプレイ・切り詰め。"
   (:require [my-storage.encoding :as enc])
-  (:import [java.io FileOutputStream File RandomAccessFile]
+  (:import [java.io FileOutputStream BufferedOutputStream File RandomAccessFile]
            [java.nio ByteBuffer]
            [java.nio.file Files]))
 
-(defrecord WAL [^FileOutputStream out file])
+(defrecord WAL [^FileOutputStream out ^BufferedOutputStream buf file fsync-policy pending])
 
 (defn open
   "追記モードで WAL を開く。"
-  [file]
-  (->WAL (FileOutputStream. ^File file true) file))
+  ([file] (open file {}))
+  ([file opts]
+   (let [fos (FileOutputStream. ^File file true)
+         bos (BufferedOutputStream. fos 65536)]
+     (->WAL fos bos file (:wal-fsync opts :always) (atom 0)))))
+
+(defn fsync! [^WAL wal]
+  (.flush ^BufferedOutputStream (:buf wal))
+  (.sync (.getFD ^FileOutputStream (:out wal))))
 
 (defn append!
   "1レコードを追記し、fsync する。"
   [^WAL wal ^bytes record]
-  (let [^FileOutputStream out (:out wal)]
-    (.write out record)
-    (.sync (.getFD out))))
+  (.write ^BufferedOutputStream (:buf wal) record)
+  (let [policy (:fsync-policy wal)]
+    (cond
+      (= policy :always) (fsync! wal)
+      (= policy :never) nil
+      (integer? policy) (when (zero? (mod (swap! (:pending wal) inc) (long policy)))
+                          (fsync! wal))))
+  wal)
 
 (defn close!
   [^WAL wal]
-  (.close ^FileOutputStream (:out wal)))
+  (fsync! wal)
+  (.close ^BufferedOutputStream (:buf wal)))
 
 (defn replay
   "WAL を先頭から読み、[memtable good-bytes] を返す。
@@ -45,8 +58,11 @@
 
 (defn rotate! 
   [^WAL wal]
-  (.close ^FileOutputStream (:out wal))
+  (.flush ^BufferedOutputStream (:buf wal))
+  (.close ^BufferedOutputStream (:buf wal))
   (let [^File f (:file wal)]
     (with-open [raf (RandomAccessFile. f "rw")]
       (.setLength raf 0))
-    (assoc wal :out (FileOutputStream. f true))))
+    (let [fos (FileOutputStream. f true)
+          bos (BufferedOutputStream. fos 6556)]
+      (assoc wal :out fos :buf bos :pending (atom 0)))))

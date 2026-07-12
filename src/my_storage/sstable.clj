@@ -10,7 +10,8 @@
            [java.util.concurrent.atomic AtomicLong]))
 
 (def ^:private sstable-magic (.getBytes "MYSSTBL1" "UTF-8"))
-(def ^:private index-interval 128)
+(def ^:private default-index-interval 128)
+(def ^:private default-bloom-fpp 0.01)
 (def ^:private footer-size 28) ; bloom-offset(8) + index-offset(8) + entry-count(4) + magic(8)
 
 (defonce ^:private sstable-counter (AtomicLong. 0))
@@ -28,39 +29,42 @@
 
 (defn write-sstable!
   "entries(sorted) を sstable として書き出す。index-interval ごとに index を作る。"
-  [^File file entries]
-  (with-open [fos (FileOutputStream. file)
-              dos (DataOutputStream. (BufferedOutputStream. fos))]
-    (let [n (count entries)
-          bf (bloom/create (max 1 n))
-          index (loop [es (seq entries)
-                       i 0
-                       acc (transient [])]
-                  (if-let [[k v] (first es)]
-                    (let [offset (.size dos)]
-                      (bloom/add! bf k)
-                      (write-entry! dos k v)
-                      (recur (next es)
-                             (inc i)
-                             (if (zero? (mod i index-interval))
-                               (conj! acc [k offset])
-                               acc)))
-                    (persistent! acc)))
-          index-offset (.size dos)]
-      (.writeInt dos (count index))
-      (doseq [[^String k ^long offset] index]
-        (let [kb (.getBytes k "UTF-8")]
-          (.writeInt dos (alength kb))
-          (.write dos kb)
-          (.writeLong dos offset)))
-      (let [bloom-offset (.size dos)]
-        (.write dos ^bytes (bloom/to-bytes bf))
-        (.writeLong dos bloom-offset)
-        (.writeLong dos index-offset)
-        (.writeInt dos n)
-        (.write dos sstable-magic)
-        (.flush dos)
-        {:file file :entry-count n :index-entries (count index)}))))
+  ([^File file entries] (write-sstable! file entries {}))
+  ([^File file entries opts]
+   (let [index-interval (:index-interval opts default-index-interval)
+         bloom-fpp (:bloom-fpp opts default-bloom-fpp)]
+     (with-open [fos (FileOutputStream. file)
+                 dos (DataOutputStream. (BufferedOutputStream. fos))]
+       (let [n (count entries)
+             bf (bloom/create (max 1 n) bloom-fpp)
+             index (loop [es (seq entries)
+                          i 0
+                          acc (transient [])]
+                     (if-let [[k v] (first es)]
+                       (let [offset (.size dos)]
+                         (bloom/add! bf k)
+                         (write-entry! dos k v)
+                         (recur (next es)
+                                (inc i)
+                                (if (zero? (mod i index-interval))
+                                  (conj! acc [k offset])
+                                  acc)))
+                       (persistent! acc)))
+             index-offset (.size dos)]
+         (.writeInt dos (count index))
+         (doseq [[^String k ^long offset] index]
+           (let [kb (.getBytes k "UTF-8")]
+             (.writeInt dos (alength kb))
+             (.write dos kb)
+             (.writeLong dos offset)))
+         (let [bloom-offset (.size dos)]
+           (.write dos ^bytes (bloom/to-bytes bf))
+           (.writeLong dos bloom-offset)
+           (.writeLong dos index-offset)
+           (.writeInt dos n)
+           (.write dos sstable-magic)
+           (.flush dos)
+           {:file file :entry-count n :index-entries (count index)}))))))
 
 (defn next-sstable-file
   [^File dir]

@@ -16,11 +16,15 @@
   (-delete [this k])
   (-close [this]))
 
+(defn- sst-opts
+  [store]
+  (select-keys (:opts store) [:index-interval :bloom-fpp]))
+
 (defn- flush-immutable!
   [store imm]
   (let [dir (:dir store)
         file (sstable/next-sstable-file dir)]
-    (sstable/write-sstable! file imm)
+    (sstable/write-sstable! file imm (sst-opts store))
     (manifest/add-sstable! dir (.getName file))
     (let [reader (sstable/open-reader file)
           new-wal (wal/rotate! (:wal @(:state store)))]
@@ -35,10 +39,19 @@
                        (.getName file) (count imm))))
     file))
 
+(defn stats
+ [store]
+  (let [{:keys [reads skips gets] :as s} @(:stats store)]
+    (assoc s :read-amp (if (pos? gets) (double (/ reads gets)) 0.0))))
+
+(defn reset-stats! [store]
+  (reset! (:stats store) {:reads 0 :skips 0 :gets 0}))
+
 (defn- lookup
   [store k]
   (let [{:keys [memtable immutables sstables]} @(:state store)
         stats (:stats store)]
+    (swap! stats update :gets inc)
     (if-let [e (or (find memtable k)
                    (some #(find % k) immutables))]
       (let [v (val e)]
@@ -63,7 +76,7 @@
         n (count sstables)
         group (subvec sstables i (inc j))
         drop-tomb? (= j (dec n))
-        new-file (compaction/compact! dir group drop-tomb?)
+        new-file (compaction/compact! dir group drop-tomb? (sst-opts store))
         new-reader (sstable/open-reader new-file)
         new-sstables (vec (concat (subvec sstables 0 i)
                                   [new-reader]
@@ -173,7 +186,7 @@
            [mt good] (wal/replay wal-file)]
        (when (< good (.length wal-file))
          (wal/truncate! wal-file good))
-       (->LSMStore (atom {:memtable mt :immutables [] :sstables sstables :wal (wal/open wal-file)})
+       (->LSMStore (atom {:memtable mt :immutables [] :sstables sstables :wal (wal/open wal-file opts)})
                    opts
                    d
-                   (atom {:reads 0 :skips 0}))))))
+                   (atom {:reads 0 :skips 0 :gets 0}))))))
