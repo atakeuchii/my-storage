@@ -18,13 +18,15 @@
 
 (defn- sst-opts
   [store]
-  (select-keys (:opts store) [:index-interval :bloom-fpp]))
+  (select-keys (:opts store) [:block-size :index-interval :bloom-fpp]))
 
 (defn- flush-immutable!
   [store imm]
   (let [dir (:dir store)
         file (sstable/next-sstable-file dir)]
     (sstable/write-sstable! file imm (sst-opts store))
+    (swap! (:stats store) update :sstable-bytes (fnil + 0) (.length ^File file))
+    (swap! (:stats store) update :flushes (fnil inc 0))
     (manifest/add-sstable! dir (.getName file))
     (let [reader (sstable/open-reader file)
           new-wal (wal/rotate! (:wal @(:state store)))]
@@ -45,7 +47,7 @@
     (assoc s :read-amp (if (pos? gets) (double (/ reads gets)) 0.0))))
 
 (defn reset-stats! [store]
-  (reset! (:stats store) {:reads 0 :skips 0 :gets 0}))
+  (swap! (:stats store) assoc :reads 0 :skips 0 :gets 0))
 
 (defn- lookup
   [store k]
@@ -76,7 +78,14 @@
         n (count sstables)
         group (subvec sstables i (inc j))
         drop-tomb? (= j (dec n))
+        t0 (System/nanoTime)
         new-file (compaction/compact! dir group drop-tomb? (sst-opts store))
+        compact-ms (/ (- (System/nanoTime) t0) 1e6)
+        _ (swap! (:stats store)
+                 (fn [st] (-> st
+                              (update :sstable-bytes (fnil + 0) (.length ^File new-file))
+                              (update :compaction-ms (fnil conj []) compact-ms)
+                              (update :compaction-bytes (fnil + 0) (.length ^File new-file)))))
         new-reader (sstable/open-reader new-file)
         new-sstables (vec (concat (subvec sstables 0 i)
                                   [new-reader]
@@ -138,11 +147,12 @@
     (->> (merge/merge-sorted sources)
          (remove (fn [[_ v]] (= v enc/tombstone))))))
 
-
 (defrecord LSMStore [state opts dir stats]
   IKVStore
   (-put [this k v]
-    (wal/append! (:wal @state) (enc/record-bytes k v))
+    (let [rec (enc/record-bytes k v)]
+      (wal/append! (:wal @state) rec)
+      (swap! stats update :wal-bytes (fnil + 0) (alength ^bytes rec)))
     (swap! state update :memtable assoc k v)
     (maybe-flush! this)
     this)
@@ -151,7 +161,9 @@
   (-scan [this start end]
     (scan* this start end))
   (-delete [this k]
-    (wal/append! (:wal @state) (enc/record-bytes k enc/tombstone))
+    (let [rec (enc/record-bytes k enc/tombstone)]
+      (wal/append! (:wal @state) rec)
+      (swap! stats update :wal-bytes (fnil + 0) (alength ^bytes rec)))
     (swap! state update :memtable assoc k enc/tombstone)
     (maybe-flush! this)
     this)
@@ -189,4 +201,6 @@
        (->LSMStore (atom {:memtable mt :immutables [] :sstables sstables :wal (wal/open wal-file opts)})
                    opts
                    d
-                   (atom {:reads 0 :skips 0 :gets 0}))))))
+                   (atom {:reads 0 :skips 0 :gets 0
+                          :wal-bytes 0 :sstable-bytes 0 :compaction-bytes 0
+                          :flushes 0 :compaction-ms []}))))))
