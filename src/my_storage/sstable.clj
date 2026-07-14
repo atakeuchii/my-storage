@@ -11,6 +11,7 @@
 
 (def ^:private sstable-magic (.getBytes "MYSSTBL1" "UTF-8"))
 (def ^:private default-index-interval 128)
+(def ^:private default-block-size 4096)
 (def ^:private default-bloom-fpp 0.01)
 (def ^:private footer-size 28) ; bloom-offset(8) + index-offset(8) + entry-count(4) + magic(8)
 
@@ -31,7 +32,8 @@
   "entries(sorted) を sstable として書き出す。index-interval ごとに index を作る。"
   ([^File file entries] (write-sstable! file entries {}))
   ([^File file entries opts]
-   (let [index-interval (:index-interval opts default-index-interval)
+   (let [block-size (long (:block-size opts default-block-size))
+         index-interval (:index-interval opts)
          bloom-fpp (:bloom-fpp opts default-bloom-fpp)]
      (with-open [fos (FileOutputStream. file)
                  dos (DataOutputStream. (BufferedOutputStream. fos))]
@@ -39,16 +41,20 @@
              bf (bloom/create (max 1 n) bloom-fpp)
              index (loop [es (seq entries)
                           i 0
-                          acc (transient [])]
+                          acc (transient [])
+                          last-off -1]
                      (if-let [[k v] (first es)]
-                       (let [offset (.size dos)]
+                       (let [offset (.size dos)
+                             add? (if index-interval
+                                    (zero? (mod i (long index-interval)))
+                                    (or (neg? last-off)
+                                        (>= (- offset last-off) block-size)))]
                          (bloom/add! bf k)
                          (write-entry! dos k v)
                          (recur (next es)
                                 (inc i)
-                                (if (zero? (mod i index-interval))
-                                  (conj! acc [k offset])
-                                  acc)))
+                                (if add? (conj! acc [k offset]) acc)
+                                (if add? offset last-off)))
                        (persistent! acc)))
              index-offset (.size dos)]
          (.writeInt dos (count index))
@@ -187,14 +193,21 @@
         start-off (if (nil? start)
                     0
                     (or (first (find-block index index-offset start)) 0))
-        buf (ByteBuffer/allocate (int (- index-offset start-off)))]
-    (read-fully ch buf start-off)
-    (.flip buf)
-    (loop [acc (transient [])]
-      (if (.hasRemaining buf)
-        (let [[k v] (read-entry buf)]
-          (cond
-            (and end (>= (compare k end) 0)) (persistent! acc)
-            (and start (neg? (compare k start))) (recur acc)
-            :else (recur (conj! acc [k v]))))
-        (persistent! acc)))))
+        end-off (if (nil? end)
+                  index-offset
+                  (if-let [blk (find-block index index-offset end)]
+                    (long (second blk))
+                    start-off))]
+    (if (<= end-off start-off)
+      []
+      (let [buf (ByteBuffer/allocate (int (- end-off start-off)))]
+        (read-fully ch buf start-off)
+        (.flip buf)
+        (loop [acc (transient [])]
+          (if (.hasRemaining buf)
+            (let [[k v] (read-entry buf)]
+              (cond
+                (and end (>= (compare k end) 0)) (persistent! acc)
+                (and start (neg? (compare k start))) (recur acc)
+                :else (recur (conj! acc [k v]))))
+            (persistent! acc)))))))
