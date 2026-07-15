@@ -109,3 +109,16 @@
 (defspec engine-equivalent-across-restart
   (prop/for-all [commands gen-commands-r]
                 (run-with-restart commands {:flush-threshold 3 :compaction-threshold 3})))
+
+(defspec rscan-range-equivalent-to-sorted-map
+  (prop/for-all [commands gen-commands
+                 start gen-key
+                 end gen-key]
+                (let [db (core/open (temp-dir) {:flush-threshold 3 :compaction-threshold 3})]
+                  (try
+                    (let [model (reduce model-apply (sorted-map) commands)]
+                      (doseq [c commands] (engine-apply! db c))
+                      (let [[lo hi] (sort [start end])]
+                        (= (mapv (fn [[k v]] [k v]) (core/rscan db lo hi))
+                           (mapv (fn [e] [(key e) (val e)]) (rsubseq model >= lo < hi)))))
+                    (finally (core/close db))))))
