@@ -315,3 +315,19 @@
           expected (for [i (range 30) :when (odd? i)] [(format "k%02d" i) (str i)])]
       (is (= (vec expected) (vec result))))
     (core/close db)))
+
+(deftest rscan-is-reverse-of-scan
+  (let [db (core/open (temp-dir) {:flush-threshold 10 :compaction-threshold 2})]
+    (doseq [i (range 235)] (core/put db (format "k%04d" i) (str "v" i)))
+    (core/put db "k0100" "OVER")
+    (core/delete db "k0050")
+    (is (= (reverse (core/scan db nil nil))
+           (into [] (core/rscan db nil nil))))
+    (core/close db)))
+
+(deftest rscan-take-n-is-latest-n
+  (let [db (core/open (temp-dir) {:flush-threshold 50})]
+    (doseq [i (range 1000)] (core/put db (format "k%05d" i) (str i)))
+    (is (= ["k00999" "k00998" "k00997"]
+           (map first (take 3 (core/rscan db nil nil)))))
+    (core/close db)))

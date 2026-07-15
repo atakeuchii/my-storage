@@ -13,6 +13,7 @@
   (-put [this k v])
   (-get [this k])
   (-scan [this start end])
+  (-rscan [this start end])
   (-delete [this k])
   (-close [this]))
 
@@ -139,12 +140,28 @@
          :else (seq sm))
        (map (fn [e] [(key e) (val e)]))))
 
+(defn- mem-range-desc [sm start end]
+  (->> (cond
+         (and start end) (rsubseq sm >= start < end)
+         start (rsubseq sm >= start)
+         end   (rsubseq sm < end)
+         :else (rseq sm))
+       (map (fn [e] [(key e) (val e)]))))
+
 (defn- scan* [store start end]
   (let [{:keys [memtable immutables sstables]} @(:state store)
         sources (concat [(mem-range memtable start end)]
                         (map #(mem-range % start end) immutables)
                         (map #(sstable/sstable-scan % start end) sstables))]
     (->> (merge/merge-sorted sources)
+         (remove (fn [[_ v]] (= v enc/tombstone))))))
+
+(defn- scan-desc* [store start end]
+  (let [{:keys [memtable immutables sstables]} @(:state store)
+        sources (concat [(mem-range-desc memtable start end)]
+                        (map #(mem-range-desc % start end) immutables)
+                        (map #(sstable/sstable-scan-desc % start end) sstables))]
+    (->> (merge/merge-sorted-desc sources)
          (remove (fn [[_ v]] (= v enc/tombstone))))))
 
 (defrecord LSMStore [state opts dir stats]
@@ -160,6 +177,8 @@
     (lookup this k))
   (-scan [this start end]
     (scan* this start end))
+  (-rscan [this start end] 
+    (scan-desc* this start end))
   (-delete [this k]
     (let [rec (enc/record-bytes k enc/tombstone)]
       (wal/append! (:wal @state) rec)
@@ -176,6 +195,7 @@
 (defn put [store k v] (-put store k v))
 (defn get [store k] (-get store k))
 (defn scan [store start end] (-scan store start end))
+(defn rscan [store start end] (-rscan store start end))
 (defn delete [store k] (-delete store k))
 (defn close [store] (-close store))
 (defn compact! [store]

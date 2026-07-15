@@ -187,27 +187,81 @@
             enc/not-found)))
       enc/not-found)))
 
+(defn- read-block-entries
+  "[start end) の1ブロックを forward に読み、[k v] の vector を返す。"
+  [^FileChannel ch ^long start ^long end]
+  (let [buf (ByteBuffer/allocate (int (- end start)))]
+    (read-fully ch buf start)
+    (.flip buf)
+    (loop [acc (transient [])]
+      (if (.hasRemaining buf)
+        (recur (conj! acc (read-entry buf)))
+        (persistent! acc)))))
+
+(defn- block-bounds
+  "index と index-offset から全ブロック境界 [start end) を昇順 vector で返す。"
+  [index ^long index-offset]
+  (let [offs (mapv (comp long second) index)
+        n (count offs)]
+    (mapv (fn [i]
+            [(nth offs i)
+             (if (< (inc i) n) (nth offs (inc i)) index-offset)])
+          (range n))))
+
+(defn- in-range?
+  [start end [k _]]
+  (and (or (nil? start) (>= (compare k start) 0))
+       (or (nil? end)   (neg? (compare k end)))))
+
 (defn sstable-scan
   [^SSTableReader reader start end]
   (let [{:keys [^FileChannel ch index index-offset]} reader
-        start-off (if (nil? start)
-                    0
-                    (or (first (find-block index index-offset start)) 0))
-        end-off (if (nil? end)
-                  index-offset
-                  (if-let [blk (find-block index index-offset end)]
-                    (long (second blk))
-                    start-off))]
-    (if (<= end-off start-off)
-      []
-      (let [buf (ByteBuffer/allocate (int (- end-off start-off)))]
-        (read-fully ch buf start-off)
-        (.flip buf)
-        (loop [acc (transient [])]
-          (if (.hasRemaining buf)
-            (let [[k v] (read-entry buf)]
-              (cond
-                (and end (>= (compare k end) 0)) (persistent! acc)
-                (and start (neg? (compare k start))) (recur acc)
-                :else (recur (conj! acc [k v]))))
-            (persistent! acc)))))))
+        bounds (block-bounds index index-offset)
+        bkeys  (mapv first index)
+        n      (count bounds)
+        before-start?
+        (fn [i]
+          (when start
+            (let [nk (when (< (inc i) n) (nth bkeys (inc i)))]
+              (and nk (<= (compare nk start) 0)))))
+        step
+        (fn step [i]
+          (lazy-seq
+           (when (< i n)
+             (cond
+               (and end (>= (compare (nth bkeys i) end) 0)) nil
+               (before-start? i) (step (inc i))
+               :else
+               (let [[bs be] (nth bounds i)
+                     es (filter #(in-range? start end %)
+                                (read-block-entries ch bs be))]
+                 (concat es (step (inc i))))))))]
+    (step 0)))
+
+(defn sstable-scan-desc
+  "[start end) を k 降順で返す遅延シーケンス。
+   ブロックの順番だけ後方から辿り、各ブロック内は forward で読んで反転する。
+   ファイル形式は forward と同一。常時メモリは1ブロックぶん。"
+  [^SSTableReader reader start end]
+  (let [{:keys [^FileChannel ch index index-offset]} reader
+        bounds (block-bounds index index-offset)
+        bkeys  (mapv first index)
+        n      (count bounds)
+        relevant?
+        (fn [i]
+          (let [bk (nth bkeys i)
+                nk (when (< (inc i) n) (nth bkeys (inc i)))]
+            (and (or (nil? end)   (neg? (compare bk end)))
+                 (or (nil? start) (nil? nk) (pos? (compare nk start))))))
+        step
+        (fn step [i]
+          (lazy-seq
+           (when (>= i 0)
+             (if (relevant? i)
+               (let [[bs be] (nth bounds i)
+                     es (->> (read-block-entries ch bs be)
+                             (filter #(in-range? start end %))
+                             reverse)]
+                 (concat es (step (dec i))))
+               (step (dec i))))))]
+    (step (dec n))))

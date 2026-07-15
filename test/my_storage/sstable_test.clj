@@ -92,3 +92,19 @@
     (is (= [["e" "e"] ["f" "f"] ["g" "g"]]
            (sstable/sstable-scan r "e" nil)))
     (sstable/close-reader! r)))
+
+(deftest sstable-scan-desc-reads-in-reverse
+  (let [dir (temp-dir)
+        f   (io/file dir "d.db")
+        _   (sstable/write-sstable!
+             f (into (sorted-map)
+                     (map (fn [i] [(format "k%03d" i) (str i)]) (range 100)))
+             {:index-interval 8})
+        r   (sstable/open-reader f)]
+    (is (= (map #(format "k%03d" %) (reverse (range 100)))
+           (map first (sstable/sstable-scan-desc r nil nil))))
+    (is (= (map #(format "k%03d" %) (reverse (range 20 30)))
+           (map first (sstable/sstable-scan-desc r "k020" "k030"))))
+    (is (= (reverse (sstable/sstable-scan r nil nil))
+           (sstable/sstable-scan-desc r nil nil)))
+    (sstable/close-reader! r)))
