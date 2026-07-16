@@ -3,6 +3,7 @@
             [clojure.java.io :as io]
             [clojure.string :as str]
             [my-storage.core :as core]
+            [my-storage.table :as tbl]
             [my-storage.manifest :as mf]))
 
 (defn- temp-dir []
@@ -330,4 +331,28 @@
     (doseq [i (range 1000)] (core/put db (format "k%05d" i) (str i)))
     (is (= ["k00999" "k00998" "k00997"]
            (map first (take 3 (core/rscan db nil nil)))))
+    (core/close db)))
+
+(deftest table-find-by-index-two-hop
+  (let [db (core/open (temp-dir) {})]
+    (tbl/insert-row! db "users" :id [:email :age] {:id 1 :name "a" :email "a@x" :age 30})
+    (tbl/insert-row! db "users" :id [:email :age] {:id 2 :name "b" :email "b@x" :age 30})
+    (is (= {:id 1 :name "a" :email "a@x" :age 30}
+           (first (tbl/find-by-index db "users" :email "a@x"))))
+    (is (= #{1 2} (set (map :id (tbl/find-by-index db "users" :age 30)))))
+    (core/close db)))
+
+(deftest table-range-by-index-respects-order
+  (let [db (core/open (temp-dir) {})]
+    (doseq [[id age] [[1 5] [2 8] [3 25] [4 30] [5 100]]]
+      (tbl/insert-row! db "users" :id [:age] {:id id :age age}))
+    (is (= [8 25] (map :age (tbl/range-by-index db "users" :age 6 26))))
+    (core/close db)))
+
+(deftest table-update-leaves-no-ghost-index
+  (let [db (core/open (temp-dir) {})]
+    (tbl/insert-row! db "users" :id [:age] {:id 1 :name "a" :age 30})
+    (tbl/update-row! db "users" :id [:age] {:id 1 :name "a" :age 31})
+    (is (empty? (tbl/find-by-index db "users" :age 30)))
+    (is (= [31] (map :age (tbl/find-by-index db "users" :age 31))))
     (core/close db)))
