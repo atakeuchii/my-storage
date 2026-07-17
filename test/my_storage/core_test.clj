@@ -356,3 +356,20 @@
     (is (empty? (tbl/find-by-index db "users" :age 30)))
     (is (= [31] (map :age (tbl/find-by-index db "users" :age 31))))
     (core/close db)))
+
+(deftest concurrent-writes-survive-restart
+  ;; 複数スレッドから同時に put しても、例外なく全件が耐久化される。
+  (let [dir (temp-dir) n-thr 8 n-each 500 total (* n-thr n-each)
+        db (core/open dir {:flush-threshold 100 :wal-fsync :always})
+        errors (atom 0)]
+    (->> (for [t (range n-thr)]
+           (future (dotimes [i n-each]
+                     (try (core/put db (format "k%02d-%05d" t i) (str t "-" i))
+                          (catch Throwable _ (swap! errors inc))))))
+         (map deref) doall)
+    (is (zero? @errors) "並行 put で例外が出ないこと")
+    (is (= total (count (core/scan db nil nil))) "close 前に全件見えること")
+    (core/close db)
+    (let [db2 (core/open dir {:flush-threshold 100 :wal-fsync :always})]
+      (is (= total (count (core/scan db2 nil nil))) "再起動後も全件生存すること")
+      (core/close db2))))
