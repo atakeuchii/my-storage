@@ -164,20 +164,21 @@
     (->> (merge/merge-sorted-desc sources)
          (remove (fn [[_ v]] (= v enc/tombstone))))))
 
-(defrecord LSMStore [state opts dir stats]
+(defrecord LSMStore [state opts dir stats lock]
   IKVStore
   (-put [this k v]
-    (let [rec (enc/record-bytes k v)]
-      (wal/append! (:wal @state) rec)
-      (swap! stats update :wal-bytes (fnil + 0) (alength ^bytes rec)))
-    (swap! state update :memtable assoc k v)
-    (maybe-flush! this)
-    this)
+    (locking lock
+      (let [rec (enc/record-bytes k v)]
+        (wal/append! (:wal @state) rec)
+        (swap! stats update :wal-bytes (fnil + 0) (alength ^bytes rec)))
+      (swap! state update :memtable assoc k v)
+      (maybe-flush! this)
+      this))
   (-get [this k]
     (lookup this k))
   (-scan [this start end]
     (scan* this start end))
-  (-rscan [this start end] 
+  (-rscan [this start end]
     (scan-desc* this start end))
   (-delete [this k]
     (let [rec (enc/record-bytes k enc/tombstone)]
@@ -223,4 +224,5 @@
                    d
                    (atom {:reads 0 :skips 0 :gets 0
                           :wal-bytes 0 :sstable-bytes 0 :compaction-bytes 0
-                          :flushes 0 :compaction-ms []}))))))
+                          :flushes 0 :compaction-ms []})
+                   (Object.))))))
