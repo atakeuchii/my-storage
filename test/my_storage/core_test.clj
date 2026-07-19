@@ -3,6 +3,7 @@
             [clojure.java.io :as io]
             [clojure.string :as str]
             [my-storage.core :as core]
+            [my-storage.inverted :as inv]
             [my-storage.table :as tbl]
             [my-storage.manifest :as mf]))
 
@@ -373,3 +374,34 @@
     (let [db2 (core/open dir {:flush-threshold 100 :wal-fsync :always})]
       (is (= total (count (core/scan db2 nil nil))) "再起動後も全件生存すること")
       (core/close db2))))
+
+(deftest inverted-search-term-returns-docs-in-order
+  (let [db (core/open (temp-dir) {})]
+    (inv/index-document! db "doc1" "the quick brown fox")
+    (inv/index-document! db "doc2" "the lazy brown dog")
+    (inv/index-document! db "doc3" "quick brown foxes jump")
+    (is (= ["doc1" "doc2" "doc3"] (inv/search-term db "brown")))
+    (is (= ["doc1" "doc3"] (inv/search-term db "quick")))
+    (is (= [] (inv/search-term db "cat")))
+    (core/close db)))
+
+(deftest inverted-search-and-is-intersection
+  (let [db (core/open (temp-dir) {})]
+    (inv/index-document! db "doc1" "the quick brown fox")
+    (inv/index-document! db "doc2" "the lazy brown dog")
+    (inv/index-document! db "doc3" "quick brown foxes jump")
+    (is (= ["doc1" "doc3"] (inv/search-and db ["quick" "brown"])))
+    (is (= ["doc1"] (inv/search-and db ["quick" "brown" "fox"])))
+    (is (= [] (inv/search-and db ["quick" "dog"])))
+    (is (= [] (inv/search-and db ["cat" "brown"])))
+    (core/close db)))
+
+(deftest inverted-search-or-is-union
+  (let [db (core/open (temp-dir) {})]
+    (inv/index-document! db "doc1" "the quick brown fox")
+    (inv/index-document! db "doc2" "the lazy brown dog")
+    (inv/index-document! db "doc3" "quick brown foxes jump")
+    (is (= ["doc1" "doc2" "doc3"] (inv/search-or db ["quick" "dog"])))
+    (is (= ["doc1" "doc2"] (inv/search-or db ["fox" "dog"])))
+    (is (= [] (inv/search-or db ["cat" "bird"])))
+    (core/close db)))
