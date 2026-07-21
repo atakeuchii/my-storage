@@ -31,4 +31,7 @@ jobs:
         env:
           GITHUB_ACTOR: ${{ github.actor }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: lein deploy github
+          RELEASE_VERSION: ${{ github.ref_name }}
+        run: |
+          export RELEASE_VERSION="${RELEASE_VERSION#v}"
+          lein deploy github
