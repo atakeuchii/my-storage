@@ -1,4 +1,3 @@
-
 (defproject atakeuchii/my-storage (or (System/getenv "RELEASE_VERSION") "0.0.0-SNAPSHOT")
   :description "FIXME: write description"
   :url "https://github.com/atakeuchii/my-storage"
